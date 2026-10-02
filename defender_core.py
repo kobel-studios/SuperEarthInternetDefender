@@ -651,25 +651,23 @@ def startup_file_paths(limit=10):
 
 
 def launch_quarantine_watchdog(backup_path, marker_path, parent_pid, timeout_seconds=7200):
-    code = (
-        "import ctypes,os,subprocess,sys,time\n"
-        "backup,marker,pid,timeout=sys.argv[1],sys.argv[2],int(sys.argv[3]),int(sys.argv[4])\n"
-        "kernel=ctypes.windll.kernel32\n"
-        "handle=kernel.OpenProcess(0x00100000,False,pid)\n"
-        "deadline=time.time()+timeout\n"
-        "parent_gone=not bool(handle)\n"
-        "while os.path.isfile(marker) and time.time()<deadline and not parent_gone:\n"
-        "    parent_gone=kernel.WaitForSingleObject(handle,2000)==0\n"
-        "if handle: kernel.CloseHandle(handle)\n"
-        "if os.path.isfile(marker) and (parent_gone or time.time()>=deadline):\n"
-        "    result=subprocess.run(['netsh','advfirewall','import',backup],capture_output=True,"
-        "creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))\n"
-        "    if result.returncode==0:\n"
-        "        try: os.unlink(marker)\n"
-        "        except OSError: pass\n"
+    script = (
+        "$backup=$args[0];$marker=$args[1];"
+        "$parentProcessId=[int]$args[2];$timeout=[int]$args[3];"
+        "$deadline=(Get-Date).AddSeconds($timeout);$parentGone=$false;"
+        "while ((Test-Path -LiteralPath $marker) -and (Get-Date) -lt $deadline -and -not $parentGone) {"
+        "try { Get-Process -Id $parentProcessId -ErrorAction Stop | Out-Null } "
+        "catch { $parentGone=$true; break };"
+        "Start-Sleep -Milliseconds 2000"
+        "};"
+        "if ((Test-Path -LiteralPath $marker) -and ($parentGone -or (Get-Date) -ge $deadline)) {"
+        "& netsh advfirewall import $backup | Out-Null;"
+        "if ($LASTEXITCODE -eq 0) { Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue }"
+        "}"
     )
     process = subprocess.Popen(
-        [sys.executable, "-c", code, str(backup_path), str(marker_path),
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+         "-Command", script, str(backup_path), str(marker_path),
          str(parent_pid), str(timeout_seconds)],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0) |
@@ -697,6 +695,8 @@ def start_network_quarantine(app_executable, runner=subprocess.run, backup_path=
         return result
 
     run(["netsh", "advfirewall", "export", str(backup)])
+    if not backup.is_file():
+        raise RuntimeError("Windows Firewall reported success but did not create the restore backup.")
     marker = backup.parent / "active_network_quarantine.json"
     marker.write_text(json.dumps({
         "backup_path": str(backup),
@@ -704,6 +704,9 @@ def start_network_quarantine(app_executable, runner=subprocess.run, backup_path=
     }, indent=2), encoding="utf-8")
     watchdog_pid = None
     try:
+        if launch_watchdog:
+            watchdog_pid = launch_quarantine_watchdog(
+                backup, marker, os.getpid())
         run([
             "netsh", "advfirewall", "firewall", "add", "rule",
             "name=Internet Defender VirusTotal Access",
@@ -743,9 +746,6 @@ def start_network_quarantine(app_executable, runner=subprocess.run, backup_path=
             "netsh", "advfirewall", "set", "allprofiles", "firewallpolicy",
             "blockinbound,blockoutbound",
         ])
-        if launch_watchdog:
-            watchdog_pid = launch_quarantine_watchdog(
-                backup, marker, os.getpid())
     except Exception:
         rollback = runner(
             ["netsh", "advfirewall", "import", str(backup)],

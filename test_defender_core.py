@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from internet_defender import (
+    InternetDefenderApp,
     application_component_paths,
     application_root,
     combined_file_severity,
@@ -296,13 +297,14 @@ class EmergencyTests(unittest.TestCase):
         self.assertIn("name=Internet Defender Emergency OUT", commands[1])
         self.assertTrue(all("delete" in command for command in commands))
 
-    def test_watchdog_is_launched_as_hidden_helper(self):
+    def test_watchdog_uses_windows_powershell_in_packaged_builds(self):
         with patch("defender_core.subprocess.Popen") as popen:
             popen.return_value.pid = 4321
             pid = launch_quarantine_watchdog("backup.wfw", "active.json", 1234, 60)
         self.assertEqual(pid, 4321)
         command = popen.call_args.args[0]
-        self.assertIn("-c", command)
+        self.assertEqual(command[0], "powershell.exe")
+        self.assertIn("-Command", command)
         self.assertIn("backup.wfw", command)
         self.assertIn("active.json", command)
 
@@ -347,6 +349,39 @@ class EmergencyTests(unittest.TestCase):
             self.assertTrue(restore_network_quarantine(backup, runner=restore_runner))
             self.assertIn("import", restore_runner.call_args.args[0])
             self.assertFalse(Path(state["marker_path"]).exists())
+
+
+class EmergencyUiTests(unittest.TestCase):
+    @staticmethod
+    def _app():
+        app = object.__new__(InternetDefenderApp)
+        app.network_quarantine_active = False
+        app.network_quarantine_backup = None
+        app.network_restore_requested = False
+        app.restore_button = Mock()
+        app.jobs = Mock()
+        app._set_activity = Mock()
+        return app
+
+    def test_restore_relaunches_with_restore_flag_when_admin_is_required(self):
+        app = self._app()
+        app._is_admin = Mock(return_value=False)
+        app._relaunch_as_admin = Mock()
+        with patch("internet_defender.active_network_quarantine_backup", return_value=None), \
+                patch("internet_defender.messagebox.askyesno", return_value=True):
+            app._restore_emergency()
+        app._relaunch_as_admin.assert_called_once_with("--restore-network")
+        app.jobs.put.assert_not_called()
+
+    def test_elevated_restore_queues_saved_firewall_backup(self):
+        app = self._app()
+        app.network_quarantine_backup = "firewall.wfw"
+        app._is_admin = Mock(return_value=True)
+        app._restore_emergency(skip_confirmation=True)
+        self.assertTrue(app.network_quarantine_active)
+        self.assertTrue(app.network_restore_requested)
+        app.jobs.put.assert_called_once_with(
+            ("restore_network_quarantine", "firewall.wfw", None))
 
 
 class FileSafetyTests(unittest.TestCase):

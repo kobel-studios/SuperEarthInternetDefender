@@ -307,7 +307,9 @@ class InternetDefenderApp(tk.Tk):
         self.whole_pc_roots = self.whole_pc_monitor.start()
         self.jobs.put(("connections",))
         self.after(100, self._poll_messages)
-        if "--enable-ad-block" in sys.argv:
+        if "--restore-network" in sys.argv:
+            self.after(700, lambda: self._restore_emergency(skip_confirmation=True))
+        elif "--enable-ad-block" in sys.argv:
             self.after(700, lambda: self._apply_ad_block(True, skip_confirmation=True))
         elif "--disable-ad-block" in sys.argv:
             self.after(700, lambda: self._apply_ad_block(False, skip_confirmation=True))
@@ -3068,9 +3070,12 @@ class InternetDefenderApp(tk.Tk):
                 "Administrator restart failed",
                 "Windows did not start the elevated copy. You can right-click the launcher and choose Run as administrator.",
             )
-            return
+            return False
         self.stop_event.set()
+        if self.whole_pc_monitor:
+            self.whole_pc_monitor.stop()
         self.destroy()
+        return True
 
     def _start_emergency(self, skip_confirmation=False):
         if self.sweep_active:
@@ -3113,19 +3118,29 @@ class InternetDefenderApp(tk.Tk):
                 "Saving the firewall setup, then taking normal programs offline", DANGER)
             self.jobs.put(("begin_network_quarantine",))
 
-    def _restore_emergency(self):
-        if not messagebox.askyesno(
+    def _restore_emergency(self, skip_confirmation=False):
+        backup = self.network_quarantine_backup or active_network_quarantine_backup()
+        if not self._is_admin():
+            if skip_confirmation or messagebox.askyesno(
+                "Administrator permission required",
+                "Restoring the saved Windows Firewall setup needs Administrator permission. Restart as Administrator now?",
+            ):
+                self._relaunch_as_admin("--restore-network")
+            return
+        if not skip_confirmation and not messagebox.askyesno(
             "Restore internet",
             "Restore the firewall setup saved before Internet Defender quarantined this PC?",
         ):
             return
         self.restore_button.configure(state="disabled")
-        if self.network_quarantine_active and self.network_quarantine_backup:
+        if backup:
+            self.network_quarantine_active = True
+            self.network_quarantine_backup = backup
             self.network_restore_requested = True
             self._set_activity("Restoring the previous firewall setup", ACCENT)
-            self.jobs.put((
-                "restore_network_quarantine", self.network_quarantine_backup, None))
+            self.jobs.put(("restore_network_quarantine", backup, None))
         else:
+            self._set_activity("Removing older Internet Defender emergency firewall rules", ACCENT)
             self.jobs.put(("restore",))
 
     def _open_recovery(self):
